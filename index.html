@@ -68,7 +68,7 @@
         </div>
     </header>
 
-    <!-- 메인 컨텐츠 영역 (상하 여백 극단적 압축) -->
+    <!-- 메인 컨텐츠 영역 -->
     <main class="flex-1 flex flex-col overflow-hidden px-2 md:px-4 pt-1.5 pb-2 gap-1.5 relative">
         
         <!-- 1. 상황 설명 영역 (폰트 키우고 여백 줄임) -->
@@ -99,11 +99,11 @@
             </div>
         </div>
 
-        <!-- 3. 대형 좌표평면 캔버스 (나머지 화면 전체 꽉 채움) -->
+        <!-- 3. 대형 좌표평면 캔버스 -->
         <div class="flex-1 bg-white rounded-md shadow-sm border border-gray-200 overflow-hidden" id="canvas-container">
             <canvas id="math-canvas" class="bg-gray-50 mode-disabled"></canvas>
             
-            <!-- 팝업 오버레이 (글자 큼직하게) -->
+            <!-- 팝업 오버레이 -->
             <div id="overlay" class="absolute inset-0 bg-black bg-opacity-40 flex items-center justify-center p-4 transition-opacity duration-300 z-20 hidden opacity-0">
                 <div id="overlay-message" class="bg-white px-6 py-5 md:px-8 md:py-6 rounded-2xl shadow-2xl text-center max-w-lg transform scale-90 transition-transform duration-300 border-4 border-blue-400">
                     <p id="overlay-text" class="text-lg md:text-xl font-bold text-gray-800 leading-relaxed"></p>
@@ -152,7 +152,7 @@
     }
 
     /* =====================================================================
-       [데이터 설정 영역]
+       [데이터 설정 영역] 
        ===================================================================== */
     const CONFIG = {
         situations: [
@@ -241,22 +241,15 @@
     };
 
     /* =====================================================================
-       [시스템 상태 변수]
+       [시스템 상태 변수 및 상황별 상태 캐시]
        ===================================================================== */
     let currentSitIdx = 0;
     
-    let state = {
-        step: 1, 
-        hiddenIndices: [], 
-        revealCount: 0,    
-        
-        userPoints: [], 
-        
-        connectedEdges: new Set(),
-        isDragging: false,
-        dragStartMath: null,
-        dragCurrentMath: null
-    };
+    // 각 상황들의 전역 진행 상태를 담는 독립된 저장소
+    let situationStates = [];
+
+    // 현재 활성화된 상태를 바라보는 참조 변수
+    let state = null;
 
     const canvas = document.getElementById('math-canvas');
     const ctx = canvas.getContext('2d');
@@ -274,20 +267,37 @@
        초기화 및 공통 로직
        --------------------------------------------------------------------- */
     function init() {
-        // 상단 가로 버튼 동적 생성
+        // 상황별 독립 상태 버퍼 최초 1회 생성
+        CONFIG.situations.forEach((sit, idx) => {
+            const hiddenIndices = [];
+            sit.data.forEach((d, i) => { if(d.hidden) hiddenIndices.push(i); });
+            
+            situationStates[idx] = {
+                step: 1,
+                hiddenIndices: hiddenIndices,
+                revealCount: 0,
+                userPoints: [],
+                connectedEdges: new Set(),
+                isDragging: false,
+                dragStartMath: null,
+                dragCurrentMath: null
+            };
+        });
+
+        // 상단 가로 상황 버튼 목록 동적 생성
         const btnWrapper = document.getElementById('situation-buttons');
         btnWrapper.innerHTML = '';
         CONFIG.situations.forEach((sit, idx) => {
             const btn = document.createElement('button');
             btn.id = `sit-btn-${idx}`;
             btn.textContent = sit.title;
-            // 버튼 글씨 크기 키우기 text-sm md:text-base
             btn.className = "px-3 py-1.5 text-sm md:text-base rounded-full border border-gray-300 bg-white text-gray-700 font-bold hover:bg-blue-50 hover:text-blue-700 transition-colors whitespace-nowrap shadow-sm";
             btn.onclick = () => loadSituation(idx);
             btnWrapper.appendChild(btn);
         });
         
-        document.getElementById('btn-reset-all').addEventListener('click', () => loadSituation(currentSitIdx));
+        // 처음부터 (초기화) 버튼은 '현재 상황'의 데이터만 step 1로 지우도록 결합
+        document.getElementById('btn-reset-all').addEventListener('click', initStep1);
         document.getElementById('btn-retry-step').addEventListener('click', retryCurrentStep);
         
         window.addEventListener('resize', resizeCanvas);
@@ -300,14 +310,26 @@
 
         overlay.addEventListener('click', () => hideOverlay());
 
+        // 첫 번째 상황 로드
         setTimeout(() => loadSituation(0), 50); 
     }
 
     function loadSituation(index) {
+        // 1. 유령 팝업을 방지하기 위해 새로운 상황을 부르기 전 이전 오버레이 상태와 타이머를 즉시 지움 (버그 해결 핵심)
+        hideOverlay();
+
+        // 이전 상황이 활성화되어 있었다면 현재 상태를 해당 슬롯에 정확하게 밀봉 저장
+        if (state && situationStates[currentSitIdx]) {
+            situationStates[currentSitIdx] = state;
+        }
+
         currentSitIdx = index;
+        // 선택한 새로운 상황의 고유 상태 참조를 로드
+        state = situationStates[index];
+        
         const sit = CONFIG.situations[currentSitIdx];
         
-        // 버튼 선택 효과 갱신
+        // 상단 선택한 상황 버튼의 스타일 토글 갱신
         CONFIG.situations.forEach((_, idx) => {
             const btn = document.getElementById(`sit-btn-${idx}`);
             if(btn) {
@@ -319,44 +341,68 @@
             }
         });
 
-        state.hiddenIndices = [];
-        sit.data.forEach((d, i) => { if(d.hidden) state.hiddenIndices.push(i); });
-        
-        initStep1();
-        
+        // 텍스트 및 레이아웃 업데이트
         document.getElementById('situation-icon').innerHTML = sit.icon;
         document.getElementById('situation-desc').innerHTML = sit.desc;
         
+        // 표와 버튼 형태를 현재 상황의 로드된 상태에 맞게 동적 복원
+        buildHorizontalTable();
+        updateActionButton();
+        
+        // 단계에 맞는 캔버스 커서 클래스 수동 갱신 및 상황별 오버레이 리로드
+        if (state.step === 1) {
+            canvas.className = 'mode-disabled bg-gray-50';
+            showOverlay("상황 설명을 읽고 표를 채워봅시다", 'default', 2500);
+        } else if (state.step === 2) {
+            canvas.className = 'mode-plot bg-gray-50';
+            showOverlay("표의 순서쌍을 좌표평면 위에 점 찍어 봅시다.<br><span class='text-sm md:text-base font-normal mt-2 block text-green-900'>(모두 찍은 후 <b>[점 정답 확인]</b> 버튼 클릭)</span>", 'success', 3500);
+        } else if (state.step === 3) {
+            canvas.className = 'mode-draw bg-gray-50';
+            showOverlay("훌륭해요! 마지막으로 점들을 선으로 이어 그래프로 나타내봅시다.", 'success', 3500);
+        } else {
+            canvas.className = 'bg-gray-50';
+            // 완료된 상황으로 다시 돌아왔을 때는 "완벽해요" 배너가 지속되게 설정 (0으로 유지)
+            showOverlay("🎉 <b>완벽해요!</b><br>주어진 상황을 아름다운 그래프로 나타냈네요!!", 'success', 0);
+        }
+
         renderMathInElement(document.body, {delimiters: [{left: "$", right: "$", display: false}], throwOnError: false});
         resizeCanvas();
     }
 
+    // 처음부터 (현재 선택된 한 가지 상황만 1단계로 완전 리셋)
     function initStep1() {
-        state.step = 1;
-        state.revealCount = 0;
-        state.userPoints = [];
-        state.connectedEdges.clear();
-        state.isDragging = false;
+        const sit = CONFIG.situations[currentSitIdx];
+        const hiddenIndices = [];
+        sit.data.forEach((d, i) => { if(d.hidden) hiddenIndices.push(i); });
         
+        // 현재 인덱스의 캐시를 깨끗이 청소
+        state = {
+            step: 1,
+            hiddenIndices: hiddenIndices,
+            revealCount: 0,
+            userPoints: [],
+            connectedEdges: new Set(),
+            isDragging: false,
+            dragStartMath: null,
+            dragCurrentMath: null
+        };
+        situationStates[currentSitIdx] = state; // 동기화
+
         buildHorizontalTable();
+        updateActionButton();
         
-        btnAction.innerHTML = `<span>표 채우기</span><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>`;
-        btnAction.className = "px-3 py-1.5 md:px-4 md:py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm md:text-base font-bold rounded-md shadow-md transition-transform transform hover:scale-105 flex items-center justify-center gap-1.5 whitespace-nowrap";
-        btnAction.onclick = revealNextY;
-        
-        btnContainer.style.display = 'flex';
         canvas.className = 'mode-disabled bg-gray-50';
-        
         showOverlay("상황 설명을 읽고 표를 채워봅시다", 'default', 2500);
         if(ctx) render(); 
     }
 
+    // 현재 단계 다시하기 (현재 진행 중인 단계의 진도만 초기화)
     function retryCurrentStep() {
         if(state.step === 1) {
             initStep1();
         } else if(state.step === 2) {
             state.userPoints = [];
-            showOverlay("표에 나타난 순서쌍을 그래프 위에 순서대로 찍어 나타내봅시다", 'default', 2500);
+            showOverlay("표의 순서쌍을 좌표평면 위에 점 찍어 봅시다.", 'default', 2500);
             render();
         } else if(state.step >= 3) {
             state.step = 3;
@@ -411,25 +457,51 @@
     }
 
     /* ---------------------------------------------------------------------
-       가로형 표 빌드 및 제어 (상하 여백 및 폰트 크기 조정)
+       가로형 표 빌드 및 제어 (상황 복원 시 공개 여부 분기 처리 구현)
        --------------------------------------------------------------------- */
     function buildHorizontalTable() {
         const sit = CONFIG.situations[currentSitIdx];
         const rowX = document.getElementById('row-x');
         const rowY = document.getElementById('row-y');
         
-        // 태블릿 맞춤 표 스타일: 패딩(py)은 얇게, 폰트(text)는 크게
         rowX.innerHTML = `<th class="bg-gray-200 border border-gray-400 py-1 px-1.5 w-16 md:w-20 break-keep text-black font-normal text-sm md:text-base">${sit.xLabel}</th>`;
         rowY.innerHTML = `<th class="bg-gray-200 border border-gray-400 py-1 px-1.5 w-16 md:w-20 break-keep text-black font-normal text-sm md:text-base">${sit.yLabel}</th>`;
         
         sit.data.forEach((row, index) => {
             rowX.innerHTML += `<td id="td-x-${index}" class="bg-white border border-gray-300 py-1 px-1 text-black font-normal text-sm md:text-base">$${row.x}$</td>`;
-            let yContent = row.hidden ? `<span class="text-black font-normal">?</span>` : `$${row.y}$`;
+            
+            let yContent = "";
+            if (row.hidden) {
+                const hiddenPos = state.hiddenIndices.indexOf(index);
+                if (hiddenPos !== -1 && hiddenPos < state.revealCount) {
+                    yContent = `<span class="text-blue-600 font-normal">$${row.y}$</span>`;
+                } else {
+                    yContent = `<span class="text-black font-normal">?</span>`;
+                }
+            } else {
+                yContent = `$${row.y}$`;
+            }
             rowY.innerHTML += `<td id="td-y-${index}" class="bg-white border border-gray-300 py-1 px-1 text-sm md:text-base font-normal">${yContent}</td>`;
         });
         
         renderMathInElement(rowX, {delimiters: [{left: "$", right: "$", display: false}]});
         renderMathInElement(rowY, {delimiters: [{left: "$", right: "$", display: false}]});
+    }
+
+    function updateActionButton() {
+        if (state.step === 1) {
+            btnContainer.style.display = 'flex';
+            btnAction.innerHTML = `<span>표 채우기</span><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>`;
+            btnAction.className = "px-3 py-1.5 md:px-4 md:py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm md:text-base font-bold rounded-md shadow-md transition-transform transform hover:scale-105 flex items-center justify-center gap-1.5 whitespace-nowrap";
+            btnAction.onclick = revealNextY;
+        } else if (state.step === 2) {
+            btnContainer.style.display = 'flex';
+            btnAction.innerHTML = `<span>점 정답 확인</span><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>`;
+            btnAction.className = "px-3 py-1.5 md:px-4 md:py-2 bg-green-600 hover:bg-green-700 text-white text-sm md:text-base font-bold rounded-md shadow-md transition-transform transform hover:scale-105 flex items-center justify-center gap-1.5 whitespace-nowrap";
+            btnAction.onclick = checkPlotting;
+        } else {
+            btnContainer.style.display = 'none';
+        }
     }
 
     function revealNextY() {
@@ -446,14 +518,11 @@
             
             if (state.revealCount >= state.hiddenIndices.length) {
                 state.step = 2;
-                
-                btnAction.innerHTML = `<span>점 정답 확인</span><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>`;
-                btnAction.className = "px-3 py-1.5 md:px-4 md:py-2 bg-green-600 hover:bg-green-700 text-white text-sm md:text-base font-bold rounded-md shadow-md transition-transform transform hover:scale-105 flex items-center justify-center gap-1.5 whitespace-nowrap";
-                btnAction.onclick = checkPlotting;
+                updateActionButton();
 
                 canvas.classList.remove('mode-disabled');
                 canvas.classList.add('mode-plot');
-                showOverlay("표에 나타난 순서쌍을 그래프 위에 순서대로 찍어 나타내봅시다.<br><span class='text-sm md:text-base font-normal mt-2 block text-green-900'>(모두 찍은 후 <b>[점 정답 확인]</b> 버튼 클릭)</span>", 'success', 5000);
+                showOverlay("표의 순서쌍을 좌표평면 위에 점 찍어 봅시다.<br><span class='text-sm md:text-base font-normal mt-2 block text-green-900'>(모두 찍은 후 <b>[점 정답 확인]</b> 버튼 클릭)</span>", 'success', 5000);
             }
         }
     }
@@ -469,7 +538,7 @@
 
         if (correctCount === sit.data.length && state.userPoints.length === sit.data.length) {
             state.step = 3;
-            btnContainer.style.display = 'none'; 
+            updateActionButton();
             canvas.classList.remove('mode-plot');
             canvas.classList.add('mode-draw');
             showOverlay("훌륭해요! 마지막으로 점들을 선으로 이어 그래프로 나타내봅시다.", 'success', 4000);
@@ -485,7 +554,7 @@
     }
 
     /* ---------------------------------------------------------------------
-       캔버스 렌더링 엔진 (여백 비율 증가로 캔버스 내 그래프 알맞게 축소)
+       캔버스 렌더링 엔진 
        --------------------------------------------------------------------- */
     function resizeCanvas() {
         const dpr = window.devicePixelRatio || 1;
@@ -500,7 +569,6 @@
         const mathWidth = sit.axis.xMax - sit.axis.xMin;
         const mathHeight = sit.axis.yMax - sit.axis.yMin;
         
-        // 캔버스 크기를 줄이기 위해 내부 패딩(padX, padY)을 12%~15% 수준으로 늘림
         const padX = mathWidth * 0.12;
         const padY = mathHeight * 0.15; 
 
@@ -542,7 +610,7 @@
     }
 
     function render() {
-        if(!ctx) return;
+        if(!ctx || !state) return;
         const width = canvas.getBoundingClientRect().width;
         const height = canvas.getBoundingClientRect().height;
         ctx.clearRect(0, 0, width, height);
@@ -568,7 +636,7 @@
         ctx.lineWidth = 1;
         ctx.strokeStyle = "#D1D5DB"; 
         
-        ctx.font = "bold 15px sans-serif"; // 축 라벨 폰트 크기
+        ctx.font = "bold 15px sans-serif"; 
         ctx.fillStyle = "#000000"; 
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -619,7 +687,7 @@
     }
 
     function drawLines() {
-        if (state.connectedEdges.size === 0) return;
+        if (!state || state.connectedEdges.size === 0) return;
         const sit = CONFIG.situations[currentSitIdx];
         ctx.save();
         ctx.lineWidth = 4; ctx.strokeStyle = "#2563EB"; ctx.lineJoin = "round"; ctx.lineCap = "round";
@@ -636,6 +704,7 @@
     }
 
     function drawPoints() {
+        if (!state) return;
         ctx.font = "bold 15px sans-serif";
         state.userPoints.forEach((pt) => {
             const px = mathToCanvas(pt.x, pt.y);
@@ -651,7 +720,7 @@
        인터랙션(이벤트) 처리
        --------------------------------------------------------------------- */
     function handleInteractStart(e) {
-        if (state.step === 4) return;
+        if (!state || state.step === 4) return;
         
         if (state.step === 1) {
             showOverlay("위의 <b>[표 채우기]</b> 버튼을 먼저 눌러<br>표를 완성해주세요!", 'error', 2500);
